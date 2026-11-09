@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 type Seminar = {
   no: number;
@@ -36,6 +36,46 @@ const steps = [
   { short: 'D', title: 'Citește forma canonică' },
 ];
 
+type QuizQuestion = {
+  question: string;
+  options: string[];
+  correct: number;
+  explain: string;
+};
+
+const quizQuestions: QuizQuestion[] = [
+  {
+    question: 'Unde pui vectorii w₁, w₂, w₃ în matricea C?',
+    options: ['Pe linii', 'Pe coloane', 'Doar pe diagonală'],
+    correct: 1,
+    explain: 'Corect. C = [w₁ w₂ w₃], deci vectorii bazei sunt coloanele.',
+  },
+  {
+    question: 'În q(x) = x₁² − x₂² + 4x₁x₃ + 4x₂x₃, cât este a₁₃ în matricea simetrică?',
+    options: ['4', '2', '1'],
+    correct: 1,
+    explain: 'Termenul mixt se împarte la 2: 4x₁x₃ dă a₁₃ = a₃₁ = 2.',
+  },
+  {
+    question: 'Valorile proprii ale unei matrici simetrice reale sunt întotdeauna…',
+    options: ['Numere reale', 'Numere complexe nereale', 'Egale cu zero'],
+    correct: 0,
+    explain: 'Orice matrice simetrică reală are spectrul real și este ortodiagonalizabilă.',
+  },
+  {
+    question: 'Dacă C este ortogonală, atunci C⁻¹ este…',
+    options: ['C', 'Matricea identitate', 'Cᵀ (transpusa)'],
+    correct: 2,
+    explain: 'Pentru coloane ortonormate, CᵀC = I, deci C⁻¹ = Cᵀ.',
+  },
+  {
+    question: 'Forma q(y) = 3y₁² − 3y₂² este…',
+    options: ['Pozitiv definită', 'Nedefinită', 'Negativ definită'],
+    correct: 1,
+    explain: 'Are un semn + și unul − (tip (1, 1)), deci ia și valori pozitive, și negative: este nedefinită.',
+  },
+];
+
 const matrixA = [
   ['1', '0', '2'],
   ['0', '-1', '2'],
@@ -47,6 +87,43 @@ const matrixD = [
   ['0', '-3', '0'],
   ['0', '0', '0'],
 ];
+
+const STORAGE_KEY = 'algebrahub-done-v1';
+const DONE_EVENT = 'algebrahub-done-changed';
+
+function subscribeToDone(onChange: () => void) {
+  window.addEventListener('storage', onChange);
+  window.addEventListener(DONE_EVENT, onChange);
+  return () => {
+    window.removeEventListener('storage', onChange);
+    window.removeEventListener(DONE_EVENT, onChange);
+  };
+}
+
+function getDoneSnapshot() {
+  try {
+    return window.localStorage.getItem(STORAGE_KEY) ?? '[]';
+  } catch {
+    return '[]';
+  }
+}
+
+function getServerDoneSnapshot() {
+  return '[]';
+}
+
+function writeDone(next: number[]) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // storage unavailable — progress just won't persist
+  }
+  window.dispatchEvent(new Event(DONE_EVENT));
+}
+
+function normalizeText(value: string) {
+  return value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
 
 function Matrix({ values, label }: { values: string[][]; label: string }) {
   return (
@@ -67,11 +144,78 @@ function Matrix({ values, label }: { values: string[][]; label: string }) {
 export default function Home() {
   const [activeStep, setActiveStep] = useState(0);
   const [filter, setFilter] = useState<'toate' | Seminar['category']>('toate');
-  const [quizAnswer, setQuizAnswer] = useState<string | null>(null);
-  const filteredSeminars = filter === 'toate' ? seminars : seminars.filter((item) => item.category === filter);
+  const [query, setQuery] = useState('');
+  const doneRaw = useSyncExternalStore(subscribeToDone, getDoneSnapshot, getServerDoneSnapshot);
+  const done = useMemo<number[]>(() => {
+    try {
+      const parsed: unknown = JSON.parse(doneRaw);
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is number => typeof item === 'number' && seminars.some((s) => s.no === item))
+        : [];
+    } catch {
+      return [];
+    }
+  }, [doneRaw]);
+  const [quizIndex, setQuizIndex] = useState(0);
+  const [quizSelected, setQuizSelected] = useState<number | null>(null);
+  const [quizScore, setQuizScore] = useState(0);
+  const [quizFinished, setQuizFinished] = useState(false);
+  const stepRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const filteredSeminars = useMemo(() => {
+    const needle = normalizeText(query.trim());
+    return seminars.filter((item) => {
+      if (filter !== 'toate' && item.category !== filter) return false;
+      if (!needle) return true;
+      return normalizeText(`${item.title} ${item.desc} ${item.category} seminar ${item.no}`).includes(needle);
+    });
+  }, [filter, query]);
+
+  const progressPercent = Math.round((done.length / seminars.length) * 100);
+  const nextUndone = seminars.find((item) => !done.includes(item.no));
+
+  function toggleDone(no: number) {
+    writeDone(done.includes(no) ? done.filter((item) => item !== no) : [...done, no]);
+  }
+
+  const quiz = quizQuestions[quizIndex];
+  const quizIsCorrect = quizSelected !== null && quizSelected === quiz.correct;
+
+  function nextQuiz() {
+    if (quizSelected === null) return;
+    const score = quizScore + (quizIsCorrect ? 1 : 0);
+    if (quizIndex === quizQuestions.length - 1) {
+      setQuizScore(score);
+      setQuizFinished(true);
+    } else {
+      setQuizScore(score);
+      setQuizIndex(quizIndex + 1);
+      setQuizSelected(null);
+    }
+  }
+
+  function restartQuiz() {
+    setQuizIndex(0);
+    setQuizSelected(null);
+    setQuizScore(0);
+    setQuizFinished(false);
+  }
+
+  function onStepKeyDown(event: React.KeyboardEvent, index: number) {
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (index + 1) % steps.length;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (index - 1 + steps.length) % steps.length;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = steps.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    setActiveStep(nextIndex);
+    stepRefs.current[nextIndex]?.focus();
+  }
 
   return (
-    <main>
+    <main id="main">
+      <a className="skip-link" href="#seminare">Sari la seminare</a>
       <header className="topbar">
         <a className="brand" href="#top" aria-label="AlgebraHub, acasă">
           <span className="brand-mark">A</span>
@@ -81,8 +225,9 @@ export default function Home() {
           <a href="#lectie">Lecția de azi</a>
           <a href="#metoda">Metodă</a>
           <a href="#seminare">Seminare</a>
+          <a href="#examene">Examene</a>
         </nav>
-        <a className="outline-button" href="#metoda">Începe exercițiul <span>↗</span></a>
+        <a className="outline-button" href="#rezolvare">Începe exercițiul <span>↗</span></a>
       </header>
 
       <section className="hero" id="top">
@@ -94,7 +239,11 @@ export default function Home() {
           </p>
           <div className="hero-actions">
             <a className="primary-button" href="#metoda">Rezolvă pas cu pas <span>↓</span></a>
-            <span className="time-note"><strong>8 min</strong> pentru recapitulare</span>
+            {done.length > 0 ? (
+              <a className="time-note progress-note" href="#seminare"><strong>{done.length} / {seminars.length} seminare parcurse</strong>continuă parcursul</a>
+            ) : (
+              <span className="time-note"><strong>8 min</strong> pentru recapitulare</span>
+            )}
           </div>
         </div>
 
@@ -161,17 +310,22 @@ export default function Home() {
         <div className="solver-intro">
           <p className="eyebrow light"><span>02</span> Rezolvarea ta completă</p>
           <h2>Un singur traseu.<br /><em>Cinci pași clari.</em></h2>
-          <p>Apasă pe fiecare etapă. Exemplul rămâne același, iar tu vezi exact ce se schimbă.</p>
+          <p>Apasă pe fiecare etapă — sau folosește săgețile ← → când o etapă e selectată. Exemplul rămâne același, iar tu vezi exact ce se schimbă.</p>
         </div>
         <div className="solver-shell">
           <div className="step-list" role="tablist" aria-label="Pașii diagonalizării">
             {steps.map((step, index) => (
               <button
                 key={step.short}
+                ref={(el) => { stepRefs.current[index] = el; }}
+                id={`step-tab-${index}`}
                 className={activeStep === index ? 'active' : ''}
                 onClick={() => setActiveStep(index)}
+                onKeyDown={(event) => onStepKeyDown(event, index)}
                 role="tab"
                 aria-selected={activeStep === index}
+                aria-controls="step-panel"
+                tabIndex={activeStep === index ? 0 : -1}
               >
                 <b>{String(index + 1).padStart(2, '0')}</b>
                 <span>{step.title}</span>
@@ -180,7 +334,7 @@ export default function Home() {
             ))}
           </div>
 
-          <div className="step-content" role="tabpanel">
+          <div className="step-content" role="tabpanel" id="step-panel" aria-labelledby={`step-tab-${activeStep}`}>
             <div className="step-number">PASUL {String(activeStep + 1).padStart(2, '0')} / 05</div>
             {activeStep === 0 && (
               <div className="step-panel-grid">
@@ -248,22 +402,62 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="quiz-section">
+      <section className="quiz-section" id="verificare">
         <div>
           <p className="eyebrow"><span>03</span> Verificare rapidă</p>
-          <h2>Unde pui vectorii <em>w₁, w₂, w₃</em> în matricea C?</h2>
+          <h2>Verifică ce ai <em>reținut.</em></h2>
+          <p className="quiz-intro">{quizQuestions.length} întrebări din lecția de azi. Primești explicația imediat, nu doar verdictul.</p>
         </div>
         <div className="quiz-card">
-          {['Pe linii', 'Pe coloane', 'Doar pe diagonală'].map((answer) => (
-            <button
-              key={answer}
-              onClick={() => setQuizAnswer(answer)}
-              className={quizAnswer === answer ? (answer === 'Pe coloane' ? 'correct' : 'wrong') : ''}
-            >
-              <span>{answer}</span><i>{quizAnswer === answer ? (answer === 'Pe coloane' ? '✓' : '×') : '○'}</i>
-            </button>
-          ))}
-          {quizAnswer && <p className={quizAnswer === 'Pe coloane' ? 'quiz-success' : 'quiz-error'}>{quizAnswer === 'Pe coloane' ? 'Corect. C = [w₁ w₂ w₃], deci vectorii bazei sunt coloanele.' : 'Mai încearcă: coordonata întâi multiplică primul vector al bazei.'}</p>}
+          {quizFinished ? (
+            <div className="quiz-done" aria-live="polite">
+              <p className="quiz-progress">Rezultat final</p>
+              <p className="quiz-score">{quizScore} / {quizQuestions.length}</p>
+              <p>{quizScore === quizQuestions.length ? 'Perfect. Ai reflexele corecte pentru diagonalizare.' : quizScore >= 3 ? 'Solid. Reia pașii la care ai ezitat și mai încearcă o dată.' : 'Reia rezolvarea pas cu pas, apoi revino aici — întrebările sunt exact pașii ei.'}</p>
+              <div className="quiz-actions">
+                <button type="button" className="quiz-next" onClick={restartQuiz}>Reia verificarea ↺</button>
+                <a className="quiz-review" href="#rezolvare">Revezi pașii ↑</a>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="quiz-top">
+                <span>Întrebarea {quizIndex + 1} / {quizQuestions.length}</span>
+                <span>Scor: {quizScore}</span>
+              </div>
+              <div className="quiz-bar" role="progressbar" aria-valuemin={0} aria-valuemax={quizQuestions.length} aria-valuenow={quizIndex} aria-label="Progres verificare">
+                <i style={{ width: `${(quizIndex / quizQuestions.length) * 100}%` }} />
+              </div>
+              <h3 className="quiz-question">{quiz.question}</h3>
+              <div role="group" aria-label="Variante de răspuns">
+                {quiz.options.map((answer, optionIndex) => {
+                  const isSelected = quizSelected === optionIndex;
+                  const stateClass = isSelected ? (optionIndex === quiz.correct ? 'correct' : 'wrong') : '';
+                  return (
+                    <button
+                      key={answer}
+                      type="button"
+                      aria-pressed={isSelected}
+                      onClick={() => setQuizSelected(optionIndex)}
+                      className={stateClass}
+                    >
+                      <span>{answer}</span><i>{isSelected ? (optionIndex === quiz.correct ? '✓' : '×') : '○'}</i>
+                    </button>
+                  );
+                })}
+              </div>
+              <div aria-live="polite">
+                {quizSelected !== null && (
+                  <p className={quizIsCorrect ? 'quiz-success' : 'quiz-error'}>
+                    {quizIsCorrect ? quiz.explain : `Nu chiar. ${quiz.explain}`}
+                  </p>
+                )}
+              </div>
+              <button type="button" className="quiz-next" onClick={nextQuiz} disabled={quizSelected === null}>
+                {quizIndex === quizQuestions.length - 1 ? 'Vezi rezultatul →' : 'Întrebarea următoare →'}
+              </button>
+            </>
+          )}
         </div>
       </section>
 
@@ -275,21 +469,85 @@ export default function Home() {
           </div>
           <p>Fișele tale de seminar au fost ordonate într-o hartă de învățare. Deschide PDF-ul sau continuă direct cu lecția interactivă.</p>
         </div>
-        <div className="filter-row" aria-label="Filtre seminare">
-          {(['toate', 'algebră', 'geometrie', 'ecuații'] as const).map((item) => (
-            <button key={item} onClick={() => setFilter(item)} className={filter === item ? 'active' : ''}>{item}</button>
-          ))}
+
+        <div className="progress-panel">
+          <div className="progress-copy">
+            <span>Progresul tău</span>
+            <strong>{done.length} din {seminars.length} seminare parcurse · {progressPercent}%</strong>
+            <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={seminars.length} aria-valuenow={done.length} aria-label="Seminare parcurse">
+              <i style={{ width: `${progressPercent}%` }} />
+            </div>
+            <small>Se salvează automat pe acest dispozitiv.</small>
+          </div>
+          <div className="progress-actions">
+            {nextUndone ? (
+              <a href={`#seminar-${nextUndone.no}`}>Continuă cu S{String(nextUndone.no).padStart(2, '0')} · {nextUndone.title} →</a>
+            ) : (
+              <span className="progress-complete">✓ Ai parcurs tot traseul. Succes la examen!</span>
+            )}
+            {done.length > 0 && (
+              <button type="button" className="progress-reset" onClick={() => writeDone([])}>Resetează progresul</button>
+            )}
+          </div>
         </div>
-        <div className="seminar-grid">
-          {filteredSeminars.map((item) => (
-            <article key={item.no} className={item.no === 9 ? 'featured-seminar' : ''}>
-              <div className="seminar-meta"><span>S{String(item.no).padStart(2, '0')}</span><span>{item.category}</span></div>
-              <h3>{item.title}</h3>
-              <p>{item.desc}</p>
-              {item.href ? <a href={item.href} target="_blank" rel="noreferrer">Deschide fișa <span>↗</span></a> : <a href="#rezolvare">Lecția interactivă <span>→</span></a>}
-            </article>
-          ))}
+
+        <div className="filter-row">
+          <div className="filter-buttons" aria-label="Filtre seminare">
+            {(['toate', 'algebră', 'geometrie', 'ecuații'] as const).map((item) => (
+              <button key={item} type="button" aria-pressed={filter === item} onClick={() => setFilter(item)} className={filter === item ? 'active' : ''}>{item}</button>
+            ))}
+          </div>
+          <label className="search-box">
+            <span className="visually-hidden">Caută seminare după titlu sau concept</span>
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Caută: valori proprii, conice, Gauss…"
+            />
+          </label>
         </div>
+        <p className="results-count" aria-live="polite">
+          {filteredSeminars.length === seminars.length
+            ? `${seminars.length} seminare`
+            : `${filteredSeminars.length} ${filteredSeminars.length === 1 ? 'seminar găsit' : 'seminare găsite'}`}
+        </p>
+
+        {filteredSeminars.length === 0 ? (
+          <div className="empty-state">
+            <h3>Niciun seminar nu se potrivește.</h3>
+            <p>Încearcă un concept mai scurt — de pildă „proprii”, „conice” sau „Gauss” — sau șterge filtrele.</p>
+            <button type="button" onClick={() => { setQuery(''); setFilter('toate'); }}>Șterge căutarea și filtrele</button>
+          </div>
+        ) : (
+          <div className="seminar-grid">
+            {filteredSeminars.map((item) => {
+              const isDone = done.includes(item.no);
+              return (
+                <article key={item.no} id={`seminar-${item.no}`} className={`${item.no === 10 ? 'featured-seminar' : ''} ${isDone ? 'is-done' : ''}`}>
+                  <div className="seminar-meta"><span>S{String(item.no).padStart(2, '0')}</span><span>{isDone ? '✓ parcurs' : item.category}</span></div>
+                  <h3>{item.title}</h3>
+                  <p>{item.desc}</p>
+                  <div className="seminar-actions">
+                    {item.href ? (
+                      <a href={item.href} target="_blank" rel="noreferrer" aria-label={`Deschide fișa PDF pentru ${item.title}`}>Fișă PDF <span>↗</span></a>
+                    ) : (
+                      <a href="#rezolvare">Lecția interactivă <span>→</span></a>
+                    )}
+                    <button
+                      type="button"
+                      className={`done-toggle ${isDone ? 'is-done' : ''}`}
+                      aria-pressed={isDone}
+                      onClick={() => toggleDone(item.no)}
+                    >
+                      {isDone ? '✓ Parcurs' : 'Marchează parcurs'}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section className="exam-section" id="examene">
@@ -305,7 +563,7 @@ export default function Home() {
             ['03', 'Transformări ortogonale', '/examene/final-3.pdf'],
             ['04', 'Metoda Gauss', '/examene/final-4.pdf'],
           ].map(([no, method, href]) => (
-            <a key={no} href={href} target="_blank" rel="noreferrer"><b>Varianta {no}</b><span>{method}</span><i>↗</i></a>
+            <a key={no} href={href} target="_blank" rel="noreferrer" aria-label={`Deschide varianta de examen ${no}, ${method} (PDF)`}><b>Varianta {no}</b><span>{method}</span><i>↗</i></a>
           ))}
         </div>
       </section>
